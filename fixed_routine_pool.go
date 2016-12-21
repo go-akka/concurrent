@@ -29,7 +29,7 @@ func NewFixedRoutinePool(nRoutine int) ExecutorService {
 		nRoutine:       nRoutine,
 		taskStack:      NewRunnableFutureStack(),
 		workerDown:     make(map[int]chan struct{}, nRoutine),
-		task:           make(chan RunnableFuture),
+		task:           make(chan RunnableFuture, nRoutine*2),
 		shutdownChan:   make(chan struct{}),
 		terminatedChan: make(chan struct{}),
 	}
@@ -105,7 +105,7 @@ func (p *FixedRoutinePool) AwaitTermination(timeout time.Duration) (terminated b
 	select {
 	case <-ctx.Done():
 		return false
-	case <-p.shutdownChan:
+	case <-p.terminatedChan:
 		{
 			return true
 		}
@@ -219,6 +219,8 @@ func (p *FixedRoutinePool) Shutdown() (err error) {
 		return
 	}
 
+	close(p.shutdownChan)
+
 	go func() {
 		totalCount := len(p.taskBackup)
 		taskCount := totalCount
@@ -231,7 +233,6 @@ func (p *FixedRoutinePool) Shutdown() (err error) {
 			}
 			time.Sleep(time.Millisecond * 100)
 		}
-		close(p.shutdownChan)
 		for _, c := range p.workerDown {
 			close(c)
 		}
