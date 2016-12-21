@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	pool := concurrent.NewFixedRoutinePool(10)
+	pool := concurrent.NewFixedRoutinePool(10, 100)
 
 	taskGenerator := func(n int) func() (int, error) {
 		return func() (int, error) {

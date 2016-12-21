@@ -4,100 +4,34 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/go-akka/concurrent/internal"
 )
 
 type FixedRoutinePool struct {
 	nRoutine int
 
-	task chan RunnableFuture
-
-	taskStack  *RunnableFutureStack
 	taskBackup []RunnableFuture
 
 	statusLocker sync.Mutex
 	initOnce     sync.Once
 
-	dispatcherDown chan struct{}
-	workerDown     map[int]chan struct{}
+	dispatcher *internal.Dispatcher
+
 	shutdownChan   chan struct{}
 	terminatedChan chan struct{}
 	isShutdownNow  bool
 }
 
-func NewFixedRoutinePool(nRoutine int) ExecutorService {
+func NewFixedRoutinePool(nRoutine, queueSize int) ExecutorService {
 	pool := &FixedRoutinePool{
 		nRoutine:       nRoutine,
-		taskStack:      NewRunnableFutureStack(),
-		workerDown:     make(map[int]chan struct{}, nRoutine),
-		task:           make(chan RunnableFuture, nRoutine*2),
+		dispatcher:     internal.NewDispatcher(nRoutine, queueSize),
 		shutdownChan:   make(chan struct{}),
 		terminatedChan: make(chan struct{}),
 	}
 
-	pool.init()
-
 	return pool
-}
-
-func (p *FixedRoutinePool) init() {
-	p.initOnce.Do(func() {
-		p.beginWorkers()
-		p.beginDispatcher()
-	})
-}
-
-func (p *FixedRoutinePool) beginWorkers() {
-
-	for i := 0; i < p.nRoutine; i++ {
-		downchan := make(chan struct{})
-		p.workerDown[i] = downchan
-		go p.handler(i, downchan)
-	}
-}
-
-func (p *FixedRoutinePool) beginDispatcher() {
-
-	p.dispatcherDown = make(chan struct{})
-
-	go func() {
-		for {
-			select {
-			case <-p.dispatcherDown:
-				return
-			default:
-			}
-
-			var task RunnableFuture
-			task = p.taskStack.Pop()
-			if task != nil {
-				p.task <- task
-			}
-
-		}
-	}()
-}
-
-func (p *FixedRoutinePool) handler(id int, shutdownChan chan struct{}) {
-	for {
-		select {
-		case <-shutdownChan:
-			return
-		case task, ok := <-p.task:
-			{
-				if !ok {
-					return
-				}
-
-				if p.isShutdownNow {
-					task.Cancel(true)
-					task.Run()
-					continue
-				}
-
-				task.Run()
-			}
-		}
-	}
 }
 
 func (p *FixedRoutinePool) AwaitTermination(timeout time.Duration) (terminated bool) {
@@ -135,14 +69,20 @@ func (p *FixedRoutinePool) InvokeAllDuration(tasks []interface{}, timeout time.D
 	}()
 
 	wg := &sync.WaitGroup{}
-	for i := 0; i < len(tasks); i++ {
-		var future Future
-		if future, err = p.Submit(tasks[i]); err != nil {
-			return
-		}
-		fs = append(fs, future)
 
+	for i := 0; i < len(tasks); i++ {
+
+		var future Future
+		var e error
+
+		if future, e = p.Submit(tasks[i]); e != nil {
+			err = e
+			break
+		}
+
+		fs = append(fs, future)
 		wg.Add(1)
+
 		ctx := context.Background()
 
 		if timeout > 0 {
@@ -160,7 +100,7 @@ func (p *FixedRoutinePool) InvokeAllDuration(tasks []interface{}, timeout time.D
 					}
 					return
 				default:
-					if future.IsDone() {
+					if future.IsDone() || future.IsCancelled() {
 						return
 					}
 
@@ -170,7 +110,7 @@ func (p *FixedRoutinePool) InvokeAllDuration(tasks []interface{}, timeout time.D
 				}
 				time.Sleep(time.Millisecond * 100)
 			}
-		}(future, ctx)
+		}(fs[i], ctx)
 	}
 
 	wg.Wait()
@@ -212,12 +152,13 @@ func (p *FixedRoutinePool) IsTerminated() bool {
 }
 
 func (p *FixedRoutinePool) Shutdown() (err error) {
-	p.statusLocker.Lock()
-	defer p.statusLocker.Unlock()
 
 	if p.IsShutdown() {
 		return
 	}
+
+	p.statusLocker.Lock()
+	defer p.statusLocker.Unlock()
 
 	close(p.shutdownChan)
 
@@ -233,41 +174,37 @@ func (p *FixedRoutinePool) Shutdown() (err error) {
 			}
 			time.Sleep(time.Millisecond * 100)
 		}
-		for _, c := range p.workerDown {
-			close(c)
-		}
+
+		p.dispatcher.Stop()
+
 		close(p.terminatedChan)
-		close(p.dispatcherDown)
 	}()
 
 	return
 }
 
 func (p *FixedRoutinePool) ShutdownNow() (runnables []Runnable, err error) {
-	p.statusLocker.Lock()
-	defer p.statusLocker.Unlock()
 
 	if p.IsShutdown() {
 		return
 	}
 
+	// p.statusLocker.Lock()
+	// defer p.statusLocker.Unlock()
+	close(p.shutdownChan)
+
 	p.isShutdownNow = true
 
-	futures := p.taskStack.PopAll()
-	close(p.dispatcherDown)
+	p.dispatcher.Stop()
 
-	for _, c := range p.workerDown {
-		close(c)
-	}
+	var futures []RunnableFuture
 
 bfor:
 	for {
 		select {
-		case f, ok := <-p.task:
+		case r := <-p.dispatcher.Queue():
 			{
-				if !ok {
-					break
-				}
+				f := r.(RunnableFuture)
 				futures = append(futures, f)
 			}
 		default:
@@ -275,31 +212,27 @@ bfor:
 		}
 	}
 
-	close(p.task)
-
 	for i := 0; i < len(futures); i++ {
 		runnables = append(runnables, futures[i])
 	}
 
-	close(p.shutdownChan)
 	close(p.terminatedChan)
 
 	return
 }
 
 func (p *FixedRoutinePool) Submit(fn interface{}) (future Future, err error) {
-	p.statusLocker.Lock()
-	defer p.statusLocker.Unlock()
-
 	if p.IsShutdown() {
 		err = ErrRejectedExecution
 		return
 	}
 
-	f := NewFutureTask(fn)
-	p.taskStack.Push(f)
-	p.taskBackup = append(p.taskBackup, f)
+	p.statusLocker.Lock()
+	defer p.statusLocker.Unlock()
 
+	f := NewFutureTask(fn)
+	p.dispatcher.Submit(f)
+	p.taskBackup = append(p.taskBackup, f)
 	future = f
 
 	return
