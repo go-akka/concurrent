@@ -53,3 +53,75 @@ func main() {
 ```
 
 The argument of `futures[i].Get().V(fn)` is the return value of `func() (int, error)`, so here should be `func(n int)` or `func(n int, e error)`.
+
+
+`example.go`
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/go-akka/concurrent"
+	_ "github.com/go-akka/concurrent/global"
+)
+
+func main() {
+
+	future := concurrent.NewFutureTask(
+		func() (int, error) {
+			return 0, fmt.Errorf("error from future")
+		})
+
+	future.OnComplete(
+		func(v int) error {
+			fmt.Println("OnComplete 1:", v)
+			return nil
+		})
+
+	future.OnComplete(
+		func(v int, err error) {
+			fmt.Println("OnComplete 2:", err)
+			return
+		})
+
+	future.OnComplete(
+		func(v int, err error) error {
+			fmt.Println("OnComplete 3: I will report error to ExecutionContext")
+			return fmt.Errorf("error from OnComplete 3, original error is: %s", err.Error())
+		})
+
+	f := future.
+		AndThen(
+			func(v int) {
+				fmt.Printf("AndThen1: I do not care error\n")
+			}).
+		AndThen(func(v int, err error) {
+			if err != nil {
+				fmt.Printf("AndThen2: %s\n", err)
+				return
+			}
+
+			fmt.Printf("AndThen2", v)
+		}).
+		AndThen(func(v int) error {
+			fmt.Println("AndThen3: I will report error to ExecutionContext")
+			return fmt.Errorf("error from AndThen3")
+		})
+
+	f.Get()
+}
+
+```
+
+```bash
+> go run example.go
+OnComplete 1: 0
+OnComplete 2: error from future
+OnComplete 3: I will report error to ExecutionContext
+AndThen1: I do not care error
+AndThen2: error from future
+AndThen3: I will report error to ExecutionContext
+```
+

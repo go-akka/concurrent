@@ -23,7 +23,7 @@ type FixedRoutinePool struct {
 	isShutdownNow  bool
 }
 
-func NewFixedRoutinePool(nRoutine, queueSize int) ExecutorService {
+func NewFixedRoutinePool(nRoutine, queueSize int) *FixedRoutinePool {
 	pool := &FixedRoutinePool{
 		nRoutine:       nRoutine,
 		dispatcher:     internal.NewDispatcher(nRoutine, queueSize),
@@ -116,6 +116,8 @@ func (p *FixedRoutinePool) InvokeAllDuration(tasks []interface{}, timeout time.D
 	wg.Wait()
 	futures = fs
 
+	p.clearBackup()
+
 	return
 }
 
@@ -180,6 +182,8 @@ func (p *FixedRoutinePool) Shutdown() (err error) {
 		close(p.terminatedChan)
 	}()
 
+	p.clearBackup()
+
 	return
 }
 
@@ -218,6 +222,8 @@ bfor:
 
 	close(p.terminatedChan)
 
+	p.clearBackup()
+
 	return
 }
 
@@ -230,14 +236,23 @@ func (p *FixedRoutinePool) Submit(fn interface{}) (future Future, err error) {
 	p.statusLocker.Lock()
 	defer p.statusLocker.Unlock()
 
-	f := NewFutureTask(fn)
-	p.dispatcher.Submit(f)
+	f := NewFutureTask(fn, ExecutionContextOption(p))
+
 	p.taskBackup = append(p.taskBackup, f)
 	future = f
 
 	return
 }
 
-func (p *FixedRoutinePool) Execute(command interface{}) {
-	p.Submit(command)
+func (p *FixedRoutinePool) Execute(runnable Runnable) {
+	p.dispatcher.Submit(runnable)
+}
+
+func (p *FixedRoutinePool) ReportFailure(cause error) {}
+
+func (p *FixedRoutinePool) clearBackup() {
+	for i := 0; i < len(p.taskBackup); i++ {
+		p.taskBackup[i] = nil
+	}
+	p.taskBackup = nil
 }

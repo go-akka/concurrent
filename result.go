@@ -19,7 +19,7 @@ func (p Result) Err() (err error) {
 	}
 
 	lastV := p.values[len(p.values)-1]
-	if lastV.IsValid() && !lastV.IsNil() && lastV.Type().ConvertibleTo(errType) {
+	if lastV.IsValid() && lastV.Type().ConvertibleTo(errType) && !lastV.IsNil() {
 		err = lastV.Interface().(error)
 		return
 	}
@@ -32,10 +32,11 @@ func (p Result) V(fn interface{}) error {
 
 func mapTo(fn interface{}, values []reflect.Value) (err error) {
 
+	var valuesError error
 	if len(values) > 0 {
 		lastV := values[len(values)-1]
-		if lastV.IsValid() && !lastV.IsNil() && lastV.Type().ConvertibleTo(errType) {
-			err = lastV.Interface().(error)
+		if lastV.IsValid() && lastV.Type().ConvertibleTo(errType) && !lastV.IsNil() {
+			valuesError = lastV.Interface().(error)
 		}
 	}
 
@@ -46,11 +47,32 @@ func mapTo(fn interface{}, values []reflect.Value) (err error) {
 		}
 
 		if fnType.NumIn() > len(values) {
-			panic(errors.New("fn args could not greater than result values"))
+			if fnType.NumIn() == len(values)+1 {
+				lastI := fnType.In(fnType.NumIn() - 1)
+				if lastI.ConvertibleTo(errType) {
+					var lastIV reflect.Value
+					if len(values) > 0 && valuesError != nil {
+						lastIV = reflect.ValueOf(valuesError)
+					} else {
+						lastIV = reflect.Zero(errType)
+					}
+
+					values = append(values, lastIV)
+				}
+			} else {
+				panic(errors.New("fn args could not greater than result values"))
+			}
 		}
 
 		fnValue := reflect.ValueOf(fn)
-		fnValue.Call(values[0:fnType.NumIn()])
+		retVales := fnValue.Call(values[0:fnType.NumIn()])
+
+		if len(retVales) > 0 {
+			lastV := retVales[len(retVales)-1]
+			if lastV.IsValid() && !lastV.IsNil() && lastV.Type().ConvertibleTo(errType) {
+				err = lastV.Interface().(error)
+			}
+		}
 	}
 	return
 }

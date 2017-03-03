@@ -4,8 +4,18 @@ import (
 	"time"
 )
 
+var (
+	GlobalExecutionContext ExecutionContext
+)
+
 type Executor interface {
-	Execute(command interface{})
+	Execute(runnable Runnable)
+}
+
+type ExecutionContext interface {
+	Executor
+
+	ReportFailure(cause error)
 }
 
 type ExecutorService interface {
